@@ -43,6 +43,35 @@ Per-instruction-class latency breakdown (production-size trace, 28 sampled waves
 
 Read this as: of the kernel's wall-clock, ~34 % is direct `s_waitcnt` stall, ~47 % is VALU latency *most of which is dependency-stall on MFMA results*, and only ~5 % is the MFMA pipeline itself.
 
+### 1a. Cross-check vs. FlyDSL `kernel-trace-analysis` skill
+
+Running `hotspot_analyzer.py` (from FlyDSL `.claude/skills/kernel-trace-analysis/`) on the same dispatch dir agrees on totals (266.4 K cycles, 144.8 K stalls, 54.3 % stall ratio) and adds two breakdowns worth recording:
+
+**Stall by hardware-counter taxonomy** (sharper than my `class=waitcnt` lump):
+
+| stall type | cycles | % of total stall |
+|---|---|---|
+| **LDS/SMEM-wait** (`s_waitcnt lgkmcnt(N)`) | 62.6 K | **43.3 %** |
+| **other** (mostly VALU dependency latency) | 43.7 K | 30.2 % |
+| **VMEM-wait** (`s_waitcnt vmcnt(N)`) | 27.3 K | 18.9 % |
+| VMEM-load (load itself blocked at issue) | 6.7 K | 4.6 % |
+| MFMA/FMA (RAW on MFMA result) | 3.7 K | 2.6 % |
+| VMEM-store | 728 | 0.5 % |
+
+The headline shift: **scalar-memory waits (`lgkmcnt`) are the single biggest stall bucket, not VMEM** — at production scale where prologue amortises 3×, we still pay 43 % of all stalls on `s_waitcnt lgkmcnt(0)`. This bumps **Rec C (kernarg coalescing) higher in priority than I had it** in §4 — see updated ordering below.
+
+**Register pressure / occupancy** (we didn't compute this manually):
+
+```
+Architecture:   gfx950 (CDNA4)
+arch_vgpr:      96 / 512 combined pool
+accum_vgpr:     0 (not used)
+occupancy:      5 waves/SIMD
+-> 6 waves/SIMD requires total_vgpr ≤ 85
+```
+
+So the kernel is **at 5 waves/SIMD** and is **11 VGPRs away from 6 waves/SIMD** (+20 % occupancy). That gives us a sixth optimization candidate (Rec F) — VGPR reduction.
+
 ---
 
 ## 2. Top instruction-level hotspots
@@ -148,6 +177,18 @@ Mapping the hot PCs back to `kernels/pa_mqa_logits_fp4.py`:
 
 ## 4. Optimisation recommendations, in order of expected impact
 
+> **Revised ordering after §1a:** With lgkmcnt-wait as the #1 stall bucket (43 %)
+> the kernarg-coalescing fix (originally C) jumps to the top tier. New
+> recommendation **F (VGPR reduction → +20 % occupancy)** added at the end.
+
+Priority ranking:
+1. **A** — MFMA target re-order (kills `s_nop 2` + several 3.5K-cycle `v_pk_mul_f32` stalls; low effort)
+2. **C** — Coalesce kernarg `s_load`s (cuts the 43 % lgkmcnt stall; low effort)
+3. **B** — Earlier KV prefetch issue point (cuts the 10.4K vmcnt(3) stall; medium effort)
+4. **F** — VGPR reduction for 6 waves/SIMD (medium effort, +20 % occupancy headroom)
+5. **D** — Defer scale extraction (small, low effort)
+6. **E** — Wider KV vectorisation (small unless KV-BW bound; high effort)
+
 ### A. Re-order MFMA target registers vs. post-process consumption
 **Likely impact: medium, easy.**
 `_issue_nt_mfmas` (line 505) writes `accs[mi_idx]` in `mi_idx = 0,1,2,3` order, but `_post_process_nt` (line 536) consumes them in the same order. Because of register pressure assignment the compiler ends up with v22, v26, v30, v34 written in order and v34 read *immediately* in the relu (`v_maximum3_f32 v51, v35, 0, 0`). Reversing the `_post_process_nt` loop to `for mi_idx in [m_tiles-1, ..., 0]` (or rotating it so the *oldest* MFMA target is consumed first) would let the MFMA pipeline drain naturally — eliminating most of the `s_nop 2` / 3-5k-cycle `v_pk_mul_f32` stalls in §2c/2d.
@@ -180,6 +221,16 @@ For repeated-kernel-launch workloads (the production case), the SQC kernarg cach
 ### E. Reduce KV `buffer_load_dwordx4` count via wider vectorisation
 **Likely impact: small unless KV bandwidth is the constraint.**
 `_prefetch_chunk` issues `N_TILES_PER_WARP * k_tiles = 4 * 1 = 4` separate `buffer_load_dwordx4` for KV per warp per chunk. The 4 loads are at addresses that differ by `_kv_chunk_bytes (16)` per nt — they're not coalescable with a wider vec_width because they target different physical pages. The KVS already does this collapse (1 packed dword for all 4 nts). Doing the same for KV would require a host-side preshuffle that interleaves token bytes across nts — a deeper refactor, but cuts SQ_INSTS_VMEM_RD by 4×.
+
+### F. Reduce VGPR pressure for 6 waves/SIMD
+**Likely impact: medium (latent), medium effort.**
+The official `hotspot_analyzer.py` reports `arch_vgpr = 96, accum_vgpr = 0, occupancy = 5 waves/SIMD`; **dropping to ≤ 85 VGPRs would put us at 6 waves/SIMD** (a 20 % occupancy gain on gfx950's combined 512-VGPR pool). Sources of the 96-VGPR footprint, in roughly descending size:
+
+1. Hoisted Q (4 mi_idx × 8-dword v8i32) + hoisted weights (4 mi_idx × 4-float). These are loaded once and reused across chunks — moving them off the live set during post-process is hard but the *upper half of each v8i32* is poisoned (cbsz=4 ignores it; see `_pack_lo_i64x2_to_i32x8`), so the allocator could in principle treat them as v4i32 + 4 garbage VGPRs. Worth checking the dumped MIR.
+2. The chunk-loop carry: `init_args = kv_pre + kvs_pre + phys_next_pre + nt0_init_scalars` carries `N_KV + N_KVS + NTPW + m_tiles*4 = 16 + 1 + 4 + 16 = 37` loop-carried VGPRs through every iteration. Splitting carry into "hot" (consumed this iter) and "cold" (next-iter prefetch) might let some get spilled to LDS during long VALU stretches; LDS is plentiful on gfx950 (160 KB).
+3. Per-nt `accs[mi_idx]` × 4 mi_idx × 4 f32 = 16 f32 live during `_compute_chunk`. Already minimal.
+
+Worth at least dumping the `--print-after-all` allocator output to see which 11+ VGPRs are easiest to retire.
 
 ---
 
