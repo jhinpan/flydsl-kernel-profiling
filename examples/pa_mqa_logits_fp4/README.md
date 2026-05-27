@@ -12,8 +12,7 @@ bundle/
 │   ├── small/             ← batch=4 ctx=8K (1 chunk/CTA, prologue-bound)
 │   │   └── ui_output_agent_26025_dispatch_201/
 │   └── big/               ← batch=8 ctx=64K (3 chunks/CTA, steady-state)
-│       ├── ui_output_agent_64914_dispatch_234/
-│       └── ui_output_agent_64914_dispatch_236/
+│       └── ui_output_agent_64914_dispatch_234/
 ├── compute_viewer/        ← feed these to rocprof-compute-viewer
 │   ├── small_results.json     (rocprofv3 full event stream)
 │   ├── small_agent_info.csv   (GPU/agent metadata)
@@ -42,6 +41,15 @@ python3 -m http.server 8080
 
 Pick `big/` for steady-state analysis (production shape, 3 chunks per CTA);
 pick `small/` to see the cold-prologue tail.
+
+### Naming convention: `ui_output_agent_<PID>_dispatch_<N>`
+
+`<N>` is rocprofv3's process-wide dispatch counter (covering torch utility
+kernels too), not the iteration index inside our test harness. Only one
+ATT-captured kernel run is kept per `small/` and `big/` — that's enough,
+since each is a full steady-state capture. A `dispatch_N` folder with no
+`se*_sm*_*.json` files is an empty placeholder (rocprofv3 reserves the
+slot before ATT collection begins) — safe to delete if you re-capture.
 
 Files inside each `ui_output_agent_*/`:
 | file | content |
