@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local capture artifacts not meant for the repo
+# (per-example checked-in traces live under examples/*/{att_viewer,compute_viewer}/)
+*.att
+out_*_code_object_id_*.out
+out_results.def
+out_results.otf2
+out_results.pftrace
