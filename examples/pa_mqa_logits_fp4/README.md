@@ -11,7 +11,7 @@ bundle/
 ├── att_viewer/            ← feed these to AMD ATT Viewer
 │   ├── small/             ← batch=4 ctx=8K (1 chunk/CTA, prologue-bound)
 │   │   └── ui_output_agent_26025_dispatch_201/
-│   └── big/               ← batch=8 ctx=64K (3 chunks/CTA, steady-state)
+│   └── big/               ← batch=8 ctx=64K (3 chunks/CTA, under target)
 │       └── ui_output_agent_64914_dispatch_234/
 ├── compute_viewer/        ← feed these to rocprof-compute-viewer
 │   ├── small_results.json     (rocprofv3 full event stream)
@@ -39,8 +39,9 @@ python3 -m http.server 8080
 # Open http://localhost:8080/ in a browser → click into a ui_output_agent_* dir
 ```
 
-Pick `big/` for steady-state analysis (production shape, 3 chunks per CTA);
-pick `small/` to see the cold-prologue tail.
+Pick `big/` for larger loop-body coverage (production-like shape, 3 chunks per
+CTA), but do not treat it as fully saturated; see the workload sizing note.
+Pick `small/` to see the cold-prologue tail.
 
 If the ATT Viewer columns/tabs are unfamiliar, read the repo-level
 [`docs/att-viewer-guide.md`](../../docs/att-viewer-guide.md). In particular:
@@ -52,9 +53,8 @@ timeline, arrows are dependency/attribution links, and high-hitcount
 
 `<N>` is rocprofv3's process-wide dispatch counter (covering torch utility
 kernels too), not the iteration index inside our test harness. Only one
-ATT-captured kernel run is kept per `small/` and `big/` — that's enough,
-since each is a full steady-state capture. A `dispatch_N` folder with no
-`se*_sm*_*.json` files is an empty placeholder (rocprofv3 reserves the
+ATT-captured kernel run is kept per `small/` and `big/`. A `dispatch_N` folder
+with no `se*_sm*_*.json` files is an empty placeholder (rocprofv3 reserves the
 slot before ATT collection begins) — safe to delete if you re-capture.
 
 Files inside each `ui_output_agent_*/`:
@@ -77,7 +77,8 @@ pip install rocprof-compute-viewer   # or: python -m pip install rocm-compute-vi
 rocprof-compute-viewer bundle/compute_viewer/big_results.json
 ```
 
-`big_results.json` is the full rocprofv3 output for the production run (~27 MB);
+`big_results.json` is the full rocprofv3 output for the production-like larger
+run (~27 MB);
 `small_results.json` is the same for the small run.
 The `discover_*.csv` files come from the `rocprofv3 --stats` discovery pass and
 include per-kernel call counts / durations across the whole test run, not just
@@ -86,7 +87,7 @@ the one ATT-captured iteration.
 ## Workload sizing note
 
 This example intentionally keeps both a small prologue-oriented trace and a
-larger steady-state trace. The current `big` shape reports
+larger loop-body trace. The current `big` shape reports
 `safe_chunks_per_cta=3` and `total_ctas=391`, which is useful but still below
 the default `parallel_unit_num=512` target. For a future saturated recapture,
 pick `batch`, effective `ctx`, or `parallel_unit_num` so `total_ctas` lands

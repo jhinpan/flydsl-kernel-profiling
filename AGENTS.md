@@ -50,8 +50,8 @@ examples/<kernel-name>/
 ├── README.md          ← per-example: file layout + repro command + dispatch_<N> naming note
 ├── REPORT.md          ← per-example analysis writeup (template below)
 ├── att_viewer/
-│   ├── small/ui_output_agent_<PID>_dispatch_<N>/   (1 chunk/CTA shape — prologue-bound)
-│   └── big/ui_output_agent_<PID>_dispatch_<N>/     (saturated steady-state shape)
+│   ├── small/ui_output_agent_<PID>_dispatch_<N>/   (diagnostic small/prologue shape)
+│   └── big/ui_output_agent_<PID>_dispatch_<N>/     (larger candidate primary shape)
 ├── compute_viewer/
 │   ├── {small,big}_results.json
 │   ├── {small,big}_agent_info.csv
@@ -63,12 +63,15 @@ examples/<kernel-name>/
     └── hotspot_analyzer.py                         (verbatim copy from FlyDSL kernel-trace-analysis skill)
 ```
 
-**Why two shapes (`small` vs `big`)?** Different stalls dominate at different
-scales. A small workload (often 1 chunk/CTA) exposes the cold prologue /
-kernarg-load chain; a saturated large workload exposes the steady-state loop
-body. "Big" must be sized by the kernel's tile/chunk schedule, not by chunk
-count alone: `total_ctas` should be close to the target parallelism and ATT
-Viewer should not show an obvious underfilled tail.
+**Why two shapes (`small` vs `big`)?** They are diagnostic labels, not proof
+that either workload is the best profiling configuration. Different stalls
+dominate at different scales. A small workload (often 1 chunk/CTA) exposes the
+cold prologue / kernarg-load chain; a saturation-validated workload exposes the
+steady-state loop body. Do not call a trace "primary", "saturated", or
+"steady-state" just because it lives under `big/`. The primary profiling config
+must be sized from the kernel's tile/chunk/grid schedule and then validated:
+`total_ctas` should be close to the target parallelism, and ATT Viewer should
+not show an obvious underfilled tail in `Compute Unit` or `Utilization`.
 
 ## Workflow
 
@@ -134,10 +137,11 @@ need it as `kernel_include_regex` in the YAML.
 
 ### Step 5 — Size the workload grid before capture
 
-Before capturing the "big" / steady-state trace, calculate whether the workload
-actually fills the target parallelism. Do not assume a larger `ctx` is enough.
-For persistent kernels like `pa_mqa_logits_fp4`, the host schedule is derived
-from tiles/chunks:
+Before capturing the larger / candidate primary trace, calculate whether the
+workload actually fills the target parallelism. Do not assume that `small`,
+`big`, a larger `ctx`, or a production-looking shape is enough. For persistent
+kernels like `pa_mqa_logits_fp4`, the host schedule is derived from
+tiles/chunks:
 
 ```text
 chunks_per_batch = ceil(context_len / block_k)
@@ -165,14 +169,17 @@ Use this before trace capture:
   not show an obvious underfilled tail where only a few waves remain.
 
 Record `block_k`, `safe_chunks_per_cta`, `total_ctas`, and
-`parallel_unit_num` in `REPORT.md`. If a trace is intentionally underfilled,
-label it as prologue/cold-start and do not use it as the main optimization
-ranking signal.
+`parallel_unit_num` in `REPORT.md`, plus a short verdict for `Compute Unit` and
+`Utilization` tail checks. If a trace is intentionally underfilled, label it as
+prologue/cold-start or underfilled loop-body coverage and do not use it as the
+main optimization ranking signal. If both captured shapes are underfilled,
+recapture a saturation-validated primary trace before writing the final ranking.
 
 ### Step 6 — Capture two ATT traces
 
 Write `input_trace.yaml` (small/prologue shape) and `input_trace_big.yaml`
-(saturated steady-state shape). Template:
+(larger candidate primary shape; only call it saturated after Step 5 passes).
+Template:
 
 ```yaml
 GlobalParameters:
@@ -214,7 +221,7 @@ FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=build-fly/python_packages:. \
     rocprofv3 -i input_trace.yaml -- python tests/kernels/test_<kernel>.py <small-flags> ...
 
 FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=build-fly/python_packages:. \
-    rocprofv3 -i input_trace_big.yaml -- python tests/kernels/test_<kernel>.py <saturated-flags> ...
+    rocprofv3 -i input_trace_big.yaml -- python tests/kernels/test_<kernel>.py <primary-shape-flags> ...
 ```
 
 ### Step 7 — Cleanup
@@ -269,8 +276,8 @@ Kernel: <JIT name> (<arch>)
 Workspace: <local probe path>
 
 ## Workload configurations measured
-[Table: shape | TFLOPS | duration | block_k | safe_chunks_per_CTA |
- total_CTAs | target_CTAs]
+[Table: shape | role | TFLOPS | duration | block_k | safe_chunks_per_CTA |
+ total_CTAs | target_CTAs | CU/Utilization tail verdict]
 
 ## 1. Headline wave-state breakdown
 [Table: EXEC/STALL/WAIT/SLEEP %]
@@ -409,9 +416,11 @@ example's README under "Source mapping note" and proceed.
 - **Don't capture only one workload shape.** Small and big expose different
   bottlenecks; one-shape analyses miss whichever stall the shape doesn't
   exercise.
-- **Don't call an underfilled grid "steady-state."** If `total_ctas` is far
-  below the target parallelism, the trace may be useful for prologue analysis,
-  but it should not drive the main optimization ranking. Resize the workload and
+- **Don't call an underfilled grid "steady-state."** `small` and `big` are trace
+  labels, not validation results. If `total_ctas` is far below the target
+  parallelism, or `Compute Unit` / `Utilization` shows a tail where only a few
+  waves remain, the trace may be useful for prologue or loop-body diagnosis, but
+  it should not drive the main optimization ranking. Resize the workload and
   recapture.
 - **Don't paste full ATT trace into the report.** REPORT.md should be the
   *analysis*; raw trace lives under `att_viewer/`.

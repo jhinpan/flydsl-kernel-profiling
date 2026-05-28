@@ -6,10 +6,10 @@ Workspace: `/sgl-workspace/jin/fp4_mqa_probe/`
 
 ## Workload configurations measured
 
-| config | batch | ctx | block_k | safe_chunks/CTA | total_CTAs | wall (us) | TFLOPS |
-|---|---|---|---|---|---|---|---|
-| small | 4 | 8192 | 256 | 1 | 69 | 4.50 | 63.7 |
-| big | 8 | 65536 | 256 | 3 | 391 | 8.13 | 605.5 |
+| config | role | batch | ctx | block_k | safe_chunks/CTA | total_CTAs | target_CTAs | CU/Utilization tail verdict | wall (us) | TFLOPS |
+|---|---|---|---|---|---|---|---|---|---|---|
+| small | prologue/cold-start | 4 | 8192 | 256 | 1 | 69 | 512 | underfilled by design | 4.50 | 63.7 |
+| big | larger loop-body, not fully saturated | 8 | 65536 | 256 | 3 | 391 | 512 | recapture needed to validate no underfilled tail | 8.13 | 605.5 |
 
 The "small" config exposes the **prologue / cold-start** overhead; the "big" config exposes the **loop-body** behaviour.
 
@@ -25,7 +25,7 @@ grid-sizing rule and viewer-reading checklist.
 
 ## 1. Headline wave-state breakdown
 
-State of one CU's waves during a single steady-state dispatch (ATT v3.0, gfx950, 1 CU × 4 SIMDs × 4 SEs):
+State of one CU's waves during the larger loop-body dispatch (ATT v3.0, gfx950, 1 CU × 4 SIMDs × 4 SEs):
 
 | state | small (1 chunk/CTA) | big (3 chunks/CTA) | meaning |
 |---|---|---|---|
@@ -249,10 +249,10 @@ Worth at least dumping the `--print-after-all` allocator output to see which 11+
 | `/sgl-workspace/jin/fp4_mqa_probe/kernels/pa_mqa_logits_fp4.py` | kernel source (from commit) |
 | `/sgl-workspace/jin/fp4_mqa_probe/tests/kernels/test_pa_mqa_logits_fp4.py` | test/bench harness |
 | `/sgl-workspace/jin/fp4_mqa_probe/input_trace.yaml` | rocprofv3 config — small workload |
-| `/sgl-workspace/jin/fp4_mqa_probe/input_trace_big.yaml` | rocprofv3 config — production workload |
+| `/sgl-workspace/jin/fp4_mqa_probe/input_trace_big.yaml` | rocprofv3 config — production-like larger workload |
 | `/sgl-workspace/jin/fp4_mqa_probe/prof/discover_*` | kernel-discovery CSVs (rocprofv3 --stats) |
 | `/sgl-workspace/jin/fp4_mqa_probe/prof/att/ui_output_agent_*` | ATT trace, small workload |
-| `/sgl-workspace/jin/fp4_mqa_probe/prof/att_big/ui_output_agent_*` | ATT trace, production workload |
+| `/sgl-workspace/jin/fp4_mqa_probe/prof/att_big/ui_output_agent_*` | ATT trace, production-like larger workload |
 
 ## 6. How to re-run
 
@@ -263,7 +263,7 @@ cd /sgl-workspace/jin/fp4_mqa_probe
 PYTHONPATH=build-fly/python_packages:. python tests/kernels/test_pa_mqa_logits_fp4.py \
     --batch 8 --ctx 65536 --num_iters 15 --num_warmup 3
 
-# full ATT trace (production workload)
+# ATT trace for the larger production-like workload
 FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=build-fly/python_packages:. \
     rocprofv3 -i input_trace_big.yaml -- python tests/kernels/test_pa_mqa_logits_fp4.py \
         --batch 8 --ctx 65536 --num_iters 12 --num_warmup 3

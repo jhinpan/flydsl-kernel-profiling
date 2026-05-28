@@ -11,8 +11,8 @@ aggregates — without re-capturing the trace.
 For one specific operator, every example contains all four of:
 
 1. **The kernel source** — the exact `.py` + test harness from the FlyDSL commit
-2. **A full rocprofv3 ATT capture** at two workload shapes (prologue-exposing
-   and steady-state)
+2. **A full rocprofv3 ATT capture** at diagnostic workload shapes, with the
+   primary trace validated against grid size and ATT tail checks
 3. **The rocprofv3 results.json** with PMC counter samples
 4. **A written report** — headline wave-state breakdown, top-N hotspot
    instructions with disassembly context, PC → Python source mapping, and a
@@ -25,7 +25,7 @@ self-contained directory**.
 
 | folder | kernel | source | headline |
 |---|---|---|---|
-| [`examples/pa_mqa_logits_fp4`](examples/pa_mqa_logits_fp4) | FP4 MQA Logits | [`ROCm/FlyDSL@9120078`](https://github.com/ROCm/FlyDSL/commit/9120078d35d7d232b3941ded5b76a1ca92329ef0) | 605 TFLOPS at batch=8 ctx=64K; profoundly stall-bound (43 % `lgkmcnt`, 19 % `vmcnt`, only 0.3 % EXEC); 5 waves/SIMD, 11 VGPRs from 6 waves/SIMD |
+| [`examples/pa_mqa_logits_fp4`](examples/pa_mqa_logits_fp4) | FP4 MQA Logits | [`ROCm/FlyDSL@9120078`](https://github.com/ROCm/FlyDSL/commit/9120078d35d7d232b3941ded5b76a1ca92329ef0) | 605 TFLOPS at batch=8 ctx=64K, but under target (`total_CTAs=391/512`); stall-bound (43 % `lgkmcnt`, 19 % `vmcnt`, only 0.3 % EXEC); 5 waves/SIMD, 11 VGPRs from 6 waves/SIMD |
 
 ## How to use a captured trace
 
@@ -36,7 +36,8 @@ cd flydsl-kernel-profiling/examples/<kernel>
 # 1. Read the analysis writeup
 $EDITOR REPORT.md
 
-# 2. ATT Viewer (instruction-level): serve the decoded folder over HTTP
+# 2. ATT Viewer (instruction-level): serve the primary trace folder over HTTP
+# Read REPORT.md first; examples often use att_viewer/big for the larger trace.
 cd att_viewer/big
 python3 -m http.server 8080
 # open http://<host>:8080/ → click into ui_output_agent_*
@@ -57,11 +58,11 @@ If the ATT Viewer tabs are unfamiliar, read
 ## Adding a new example
 
 **Read [`AGENTS.md`](AGENTS.md) first.** It codifies the entire workflow:
-environment setup, workload/grid sizing, trace capture (small + saturated
-steady-state shapes), cleanup, analysis with `hotspot_analyzer.py`, report
-template, the per-example directory layout, and the gotchas that cost us time to
-figure out (empty-shell folders, `dispatch_<N>` numbering, debug-info plumbing,
-etc.).
+environment setup, workload/grid sizing, trace capture (`small` / `big` as
+diagnostic labels, not automatic proof of saturation), cleanup, analysis with
+`hotspot_analyzer.py`, report template, the per-example directory layout, and
+the gotchas that cost us time to figure out (empty-shell folders, `dispatch_<N>`
+numbering, debug-info plumbing, etc.).
 
 Quick canonical layout:
 
