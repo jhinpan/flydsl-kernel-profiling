@@ -1,0 +1,35 @@
+GlobalParameters:
+  KeepBuildTmp: True
+  AsmDebug: True
+jobs:
+    -
+        kernel_include_regex: "flash_attn_func_kernel_0"
+        kernel_exclude_regex:
+        kernel_iteration_range: "[6, [8-8]]"
+        output_file: out
+        output_directory: /sgl-workspace/jin/flash_attn_func_probe/prof/att_small
+        output_format: [json, csv]
+        truncate_kernels: true
+        sys_trace: false
+        advanced_thread_trace: true
+        att_target_cu: 1
+        att_shader_engine_mask: "0xf"
+        att_simd_select: "0xf"
+        att_buffer_size: "0xC000000"
+pmc:
+  - SQ_INSTS_VALU
+  - SQ_INSTS_MFMA
+  - SQ_INSTS_LDS
+  - SQ_INSTS_VMEM
+  - SQ_INSTS_VMEM_RD
+  - SQ_INSTS_VMEM_WR
+  - SQ_INSTS_SALU
+  - SQ_INSTS_SMEM
+  - SQ_WAVES
+  - SQ_WAIT_INST_LDS
+  - SQ_LDS_BANK_CONFLICT
+  - TCC_HIT_sum
+  - TCC_MISS_sum
+  - GRBM_GUI_ACTIVE
+  - SQ_BUSY_CYCLES
+  - SQ_VALU_MFMA_BUSY_CYCLES

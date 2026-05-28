@@ -26,6 +26,7 @@ self-contained directory**.
 | folder | kernel | source | headline |
 |---|---|---|---|
 | [`examples/pa_mqa_logits_fp4`](examples/pa_mqa_logits_fp4) | FP4 MQA Logits | [`ROCm/FlyDSL@9120078`](https://github.com/ROCm/FlyDSL/commit/9120078d35d7d232b3941ded5b76a1ca92329ef0) | 1189.9 TFLOPS at batch=32 ctx=128K with `total_CTAs=507/512`; stall-bound (35 % `vmcnt`, 22 % `lgkmcnt`, only 0.1 % EXEC); 5 waves/SIMD, 11 VGPRs from 6 waves/SIMD |
+| [`examples/flash_attn_func`](examples/flash_attn_func) | Flash Attention Func | `FlyDSL-lab@18c5a7e` | 371.7 TFLOPS at B=1 S=2048 H=32 D=128 with `total_CTAs=512/512`; ping-pong exists but consume points still stall (28 % `vmcnt`, 16 % `lgkmcnt`, 58.5 % stall ratio) |
 
 ## How to use a captured trace
 
