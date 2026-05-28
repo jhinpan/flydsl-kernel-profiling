@@ -8,12 +8,15 @@ Probe: `/sgl-workspace/jin/flash_attn_func_probe/`
 
 | config | role | B | S | H | D | BLOCK_M | CTAs | target_CTAs | CU/Utilization tail verdict | wall (us) | TFLOPS |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|
-| small | underfilled diagnostic | 1 | 512 | 8 | 128 | 128 | 32 | 512 | underfilled by design | 22.4 | 23.9 |
+| small | underfilled diagnostic | 1 | 1024 | 16 | 128 | 128 | 128 | 512 | underfilled by design, but sampled CU has waves | 38.2 | 112.5 |
 | big | primary / saturation-validated | 1 | 2048 | 32 | 128 | 128 | 512 | 512 | validated: 32 wave JSONs, 512 occupancy rows, no long sampled-CU tail | 92.4 | 371.7 |
 
 Grid sizing comes from `grid_x = batch * ceil(seq_len / BLOCK_M) * num_heads`.
 For the primary trace that is `1 * 16 * 32 = 512` CTAs. rocprof's discovery CSV
 cross-checks this as `Grid_Size_X=131072` threads / `Workgroup_Size_X=256`.
+The kept cold-debug traces are `small/ui_output_agent_32235_dispatch_44` and
+`big/ui_output_agent_38430_dispatch_44`, both with 2069 / 2070 ISA rows mapped
+to Python source.
 
 ## 1. What this kernel is doing
 
@@ -40,53 +43,53 @@ Timeline state mapping: `1=EXEC`, `2=WAIT`, `3=STALL`, `4=SLEEP`.
 
 | state | small | big | meaning |
 |---|---:|---:|---|
-| EXEC | 1.0 % | 0.0 % | instruction issue |
-| WAIT | 43.5 % | 42.7 % | operand / scheduler wait |
-| STALL | 35.1 % | 35.9 % | explicit stall, mostly waitcnt/barrier |
-| SLEEP | 20.4 % | 21.4 % | sampled wave inactive windows |
+| EXEC | 0.4 % | 0.0 % | instruction issue |
+| WAIT | 48.4 % | 42.3 % | operand / scheduler wait |
+| STALL | 34.8 % | 36.7 % | explicit stall, mostly waitcnt/barrier |
+| SLEEP | 16.4 % | 21.0 % | sampled wave inactive windows |
 
 The primary trace is not compute-issue bound. `hotspot_analyzer.py` reports
-3.17M total cycles, 1.86M stall cycles, and a 58.5 % stall ratio.
+2.86M total cycles, 1.68M stall cycles, and a 58.8 % stall ratio.
 
 Stall taxonomy from `hotspot_analyzer.py` on `att_viewer/big/...dispatch_44`:
 
 | type | stall cycles | % of total stall |
 |---|---:|---:|
-| other | 575.1K | 31.0 % |
-| VMEM-wait | 518.6K | 28.0 % |
-| LDS/SMEM-wait | 304.7K | 16.4 % |
-| MFMA/FMA | 157.9K | 8.5 % |
-| VMEM-load | 106.5K | 5.7 % |
-| VMEM-store | 86.4K | 4.7 % |
-| barrier | 75.1K | 4.0 % |
-| LDS | 30.7K | 1.7 % |
+| other | 492.9K | 29.4 % |
+| VMEM-wait | 490.6K | 29.2 % |
+| LDS/SMEM-wait | 274.0K | 16.3 % |
+| MFMA/FMA | 133.3K | 7.9 % |
+| VMEM-load | 105.9K | 6.3 % |
+| VMEM-store | 88.6K | 5.3 % |
+| barrier | 66.9K | 4.0 % |
+| LDS | 25.4K | 1.5 % |
 
 Per-instruction-class latency/stall breakdown:
 
 | class | count | latency cycles | stall cycles | lat % | stall % |
 |---|---:|---:|---:|---:|---:|
-| VALU | 1366 | 1.342M | 322.2K | 42.3 % | 17.4 % |
-| waitcnt | 84 | 823.3K | 823.3K | 26.0 % | 44.4 % |
-| SALU | 407 | 343.2K | 252.9K | 10.8 % | 13.6 % |
-| MFMA | 68 | 232.4K | 157.9K | 7.3 % | 8.5 % |
-| VMEM | 44 | 215.3K | 192.9K | 6.8 % | 10.4 % |
-| LDS | 96 | 138.4K | 30.7K | 4.4 % | 1.7 % |
-| barrier | 4 | 75.1K | 75.1K | 2.4 % | 4.0 % |
+| VALU | 1366 | 1.178M | 266.8K | 41.2 % | 15.9 % |
+| waitcnt | 84 | 764.5K | 764.5K | 26.8 % | 45.6 % |
+| SALU | 407 | 311.2K | 226.1K | 10.9 % | 13.5 % |
+| VMEM | 44 | 214.7K | 194.4K | 7.5 % | 11.6 % |
+| MFMA | 68 | 199.3K | 133.3K | 7.0 % | 7.9 % |
+| LDS | 96 | 120.8K | 25.4K | 4.2 % | 1.5 % |
+| barrier | 4 | 66.9K | 66.9K | 2.3 % | 4.0 % |
 
 ## 3. Top hotspot PCs
 
 | PC | hit | stall | instruction | interpretation |
 |---:|---:|---:|---|---|
-| 11448 | 280 | 150.6K | `s_waitcnt vmcnt(0)` | waits after `buffer_load_dwordx4 ... lds`, before V/K LDS reads |
-| 15492 | 280 | 120.8K | `s_waitcnt vmcnt(0)` | second repeated DMA-to-LDS drain point |
-| 11664 | 280 | 101.4K | `s_waitcnt vmcnt(0)` | consume-side wait after GEMM1 MFMA group |
-| 15672 | 280 | 85.4K | `s_waitcnt vmcnt(0)` | same pattern in later unrolled body |
-| 7284 | 32 | 44.5K | `s_waitcnt vmcnt(7)` | early global/DMA prefetch drain |
-| 5900 | 32 | 40.1K | `s_waitcnt lgkmcnt(0)` | scalar prologue argument load |
-| 11264 | 280 | 34.2K | `s_barrier` | barrier after waitcnt before LDS reuse |
-| 11320 | 280 | 22.0K | `buffer_load_dwordx4 ... lds` | DMA-to-LDS issue is itself visible |
-| 6720 | 32 | 20.6K | `buffer_load_dwordx4 ... lds` | early DMA-to-LDS load |
-| 12448 | 280 | 16.3K | `s_nop 10` | compiler-inserted wait before softmax value movement |
+| 11448 | 248 | 142.9K | `s_waitcnt vmcnt(0)` | waits after `buffer_load_dwordx4 ... lds`, before V/K LDS reads |
+| 15492 | 248 | 111.1K | `s_waitcnt vmcnt(0)` | second repeated DMA-to-LDS drain point |
+| 11664 | 248 | 96.9K | `s_waitcnt vmcnt(0)` | consume-side wait after GEMM1 MFMA group |
+| 15672 | 248 | 81.2K | `s_waitcnt vmcnt(0)` | same pattern in later unrolled body |
+| 7284 | 32 | 43.6K | `s_waitcnt vmcnt(7)` | early global/DMA prefetch drain |
+| 5900 | 32 | 41.2K | `s_waitcnt lgkmcnt(0)` | scalar prologue argument load |
+| 11264 | 248 | 33.0K | `s_barrier` | barrier after waitcnt before LDS reuse |
+| 11320 | 248 | 27.1K | `buffer_load_dwordx4 ... lds` | DMA-to-LDS issue is itself visible |
+| 6720 | 32 | 21.7K | `buffer_load_dwordx4 ... lds` | early DMA-to-LDS load |
+| 12448 | 248 | 14.4K | `s_nop 10` | compiler-inserted wait before softmax value movement |
 
 The repeated pattern is:
 
@@ -136,6 +139,7 @@ Priority ranking:
    reports `VGPR_Count=124`; the analyzer's occupancy heuristic labels this as
    a limiting factor, though its architecture string incorrectly says gfx942
    for this gfx950 capture.
-5. Fix source mapping for future captures. `code.json` has 0 / 2070
-   instructions mapped despite debug-info mode, so current PC-to-source mapping
-   requires manual source-region correlation.
+5. Improve line attribution granularity. Cold-debug recapture fixed source
+   mapping (`2069 / 2070` mapped), but many hot waitcnts still aggregate to the
+   kernel decorator or MFMA wrapper lines; precise phase labels still require
+   correlating the PC pattern with the source regions above.

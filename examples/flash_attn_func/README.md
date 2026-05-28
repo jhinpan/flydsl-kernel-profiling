@@ -10,10 +10,10 @@ bundle/
 ├── REPORT.md              ← ping-pong / stall analysis (read first)
 ├── README.md              ← this file
 ├── att_viewer/
-│   ├── small/             ← B=1 S=512 H=8 D=128 bf16 causal, 32 CTAs
-│   │   └── ui_output_agent_7267_dispatch_42/
+│   ├── small/             ← B=1 S=1024 H=16 D=128 bf16 causal, 128 CTAs
+│   │   └── ui_output_agent_32235_dispatch_44/
 │   └── big/               ← B=1 S=2048 H=32 D=128 bf16 causal, 512 CTAs
-│       └── ui_output_agent_25171_dispatch_44/
+│       └── ui_output_agent_38430_dispatch_44/
 ├── compute_viewer/
 │   ├── small_results.json
 │   ├── small_agent_info.csv
@@ -36,18 +36,19 @@ bundle/
 ```bash
 cd bundle/att_viewer/big
 python3 -m http.server 8080
-# Open http://localhost:8080/ in a browser, then click ui_output_agent_25171_dispatch_44/
+# Open http://localhost:8080/ in a browser, then click ui_output_agent_38430_dispatch_44/
 ```
 
 Use `big/` for the primary trace. It has `B=1 S=2048 H=32 D=128`,
-`BLOCK_M=128`, 512 CTAs, 32 sampled wave JSON files, and 512 occupancy rows
-across the sampled shader engines. Use `small/` only as the underfilled
-diagnostic contrast.
+`BLOCK_M=128`, 512 CTAs, 32 sampled wave JSON files, 512 occupancy rows across
+the sampled shader engines, and 2069 / 2070 ISA rows with Python source
+mapping. Use `small/` only as the underfilled diagnostic contrast; it now uses
+128 CTAs so the sampled CU reliably has waves while still remaining
+underfilled.
 
 `dispatch_<N>` is rocprofv3's process-wide dispatch counter, not the benchmark
-iteration index. This capture also produced a second non-empty scratch
-dispatch for the big run; this bundle keeps `dispatch_44` as the later
-steady-state sample.
+iteration index. The cold-debug capture produced two non-empty samples for each
+shape; this bundle keeps `dispatch_44` as the later steady-state sample.
 
 ### rocprof-compute-viewer
 
@@ -64,8 +65,11 @@ the primary workload has `131072 / 256 = 512` CTAs.
 
 ```bash
 cd /sgl-workspace/jin/flash_attn_func_probe
+rm -rf .flydsl_trace_cache_cold_debug prof/att_big
 ROCR_VISIBLE_DEVICES=0 FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 \
-FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=build-fly/python_packages:. \
+FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 \
+FLYDSL_RUNTIME_CACHE_DIR=$PWD/.flydsl_trace_cache_cold_debug \
+PYTHONPATH=build-fly/python_packages:. \
     rocprofv3 -i input_trace_big.yaml -- python tests/kernels/test_flash_attn_func.py \
         --batch 1 --seq_len 2048 --num_heads 32 --head_dim 128 \
         --dtype bf16 --causal --warmup 3 --iters 12
@@ -77,6 +81,9 @@ run's printed microbenchmark time; rocprofv3 changes the timing path.
 
 ## Source mapping note
 
-`FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` was set, but `code.json` still has 0 / 2070
-instructions mapped to Python source. The report therefore maps hot PCs to
-source regions manually from the copied source.
+This bundle was recaptured from a fresh `FLYDSL_RUNTIME_CACHE_DIR` with
+`FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` before discovery/capture. `code.json` has
+2069 / 2070 instructions mapped to Python source, and the FlyDSL code object
+contains a non-empty `.debug_line` section. Some hot waits still aggregate to
+the kernel decorator or MFMA wrapper line; the report keeps manual source-region
+correlation for precise phase labels.

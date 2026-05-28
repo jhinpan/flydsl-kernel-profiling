@@ -108,16 +108,51 @@ ln -sf <flydsl_root>/tests/test_common.py $PROBE/tests/test_common.py
 ### Step 3 — Baseline run (no profiler)
 
 Verify correctness and get a baseline TFLOPS number to compare against the
-traced run:
+traced run. Do not let a no-debug baseline contaminate the trace compile cache:
+either use the trace debug environment below for this run, or use a separate
+baseline cache directory. Never rely on the default `~/.flydsl/cache` for a
+trace that must have source mapping.
 
 ```bash
 cd $PROBE
+TRACE_CACHE=$PROBE/.flydsl_trace_cache
+rm -rf "$TRACE_CACHE"
+export FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1
+export FLYDSL_RUNTIME_CACHE_DIR="$TRACE_CACHE"
+
 PYTHONPATH=build-fly/python_packages:. python tests/kernels/test_<kernel>.py \
     <small-shape-flags> --num_iters 10 --num_warmup 3
 # expect: cosine_sim ~1.0, some TFLOPS number
 ```
 
 If correctness fails, **stop and report**. Don't profile a broken kernel.
+
+### Step 3a — Debug-info cold-cache rule
+
+ATT source mapping only works when FlyDSL compiles the HSACO with DWARF line
+tables. `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` is compile-time state, not a
+post-processing option: rocprofv3 can read `.debug_line`, but it cannot add it
+after a kernel was compiled. Therefore every command that can trigger JIT for
+the traced kernel must use the same fresh debug cache:
+
+```bash
+TRACE_CACHE=$PROBE/.flydsl_trace_cache
+rm -rf "$TRACE_CACHE"
+export FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1
+export FLYDSL_RUNTIME_CACHE_DIR="$TRACE_CACHE"
+export PYTHONPATH=build-fly/python_packages:.
+```
+
+This applies to discovery and ATT capture. The existing FlyDSL
+`capture-kernel-trace` skill sets `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` for the
+capture step, but it does not clear or isolate FlyDSL's JIT cache and its
+discovery command can compile the kernel first without debug info. If discovery
+or a baseline run already cached a no-debug HSACO, the later capture may show
+0 source-mapped instructions even though the rocprofv3 YAML has `AsmDebug:
+True`.
+
+Use a fresh `FLYDSL_RUNTIME_CACHE_DIR` for the trace session. Do not delete a
+shared `~/.flydsl/cache` unless the user explicitly asks for that.
 
 ### Step 4 — Kernel discovery
 
@@ -126,6 +161,7 @@ it with `--stats`:
 
 ```bash
 mkdir -p prof
+FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 FLYDSL_RUNTIME_CACHE_DIR="$TRACE_CACHE" \
 rocprofv3 --stats --kernel-trace -f csv -o prof/discover -- \
     python tests/kernels/test_<kernel>.py <small-shape-flags> --num_iters 8 --num_warmup 2
 grep -v "at::native\|rocclr\|rocprim\|Cijk" prof/discover_kernel_stats.csv
@@ -217,10 +253,12 @@ choice: `"[6, [8-8]]"` (skip 0-5, capture iter 8).
 Run both:
 
 ```bash
-FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=build-fly/python_packages:. \
+FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 FLYDSL_RUNTIME_CACHE_DIR="$TRACE_CACHE" \
+PYTHONPATH=build-fly/python_packages:. \
     rocprofv3 -i input_trace.yaml -- python tests/kernels/test_<kernel>.py <small-flags> ...
 
-FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=build-fly/python_packages:. \
+FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 FLYDSL_RUNTIME_CACHE_DIR="$TRACE_CACHE" \
+PYTHONPATH=build-fly/python_packages:. \
     rocprofv3 -i input_trace_big.yaml -- python tests/kernels/test_<kernel>.py <primary-shape-flags> ...
 ```
 
@@ -239,6 +277,27 @@ done
 ```
 
 (See Gotcha 3 for why empty shells exist.)
+
+### Step 7a — Verify source mapping
+
+Source mapping is required unless the report explicitly says why it is
+unavailable. Check both `code.json` and the captured code object:
+
+```bash
+python3 - <<'PY'
+import glob, json
+for p in glob.glob("prof/att*/ui_output_agent_*/code.json"):
+    code = json.load(open(p))["code"]
+    mapped = sum(1 for row in code if len(row) > 3 and row[3])
+    print(f"{p}: mapped={mapped}/{len(code)}")
+PY
+
+/opt/rocm/llvm/bin/llvm-dwarfdump --debug-line prof/att_big/out_gfx*_code_object_id_*.out | head -80
+```
+
+If `mapped=0` for the FlyDSL kernel and the relevant code object's
+`.debug_line` is empty, recapture from a fresh `FLYDSL_RUNTIME_CACHE_DIR`.
+Do not publish the trace as source-mapped.
 
 ### Step 8 — Analyze with `hotspot_analyzer.py` (DO NOT roll your own)
 
@@ -389,24 +448,27 @@ buffer has slack. With `[8-8]` you reliably get TWO captures. Both are full
 and valid; pick either. Two captures function as a noise-floor sanity check
 (should be within a few percent of each other).
 
-### 5. `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` doesn't always plumb through
+### 5. Source mapping can silently reuse a no-debug HSACO
 
 Symptom: every `code.json` entry has `source_loc = ""`; `snapshots.json` and
 `source_0_*.py` files don't exist; `hotspot_analyzer.py` shows `<unknown>`
 for every line.
 
-The env var should make the FlyDSL JIT pass DWARF line-table info into the
-hsaco. If it didn't work, verify on the source machine:
+First suspect cache contamination: discovery or a no-profiler baseline may have
+compiled and cached the kernel before `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` was
+set. Recapture with a fresh `FLYDSL_RUNTIME_CACHE_DIR` and the debug env set
+for every JIT-triggering command.
+
+Verify on the source machine:
 ```bash
-# Find the JIT artifact
-ls /tmp/flydsl_* /tmp/kernel_trace_output/*build_tmp* 2>/dev/null
-# Check for .debug_line section
-llvm-dwarfdump --debug-line <kernel>.hsaco | head -30
+# Check the captured code object for .debug_line.
+/opt/rocm/llvm/bin/llvm-dwarfdump --debug-line prof/att_big/out_gfx*_code_object_id_*.out | head -80
 ```
 
-If `.debug_line` is empty, the FlyDSL compile pipeline isn't honouring the
-env var — that's a FlyDSL-side bug, not a rocprofv3 issue. Report in the
-example's README under "Source mapping note" and proceed.
+If `.debug_line` is still empty after a confirmed cold debug-cache capture,
+then the FlyDSL compile pipeline is not honoring the env var for that kernel.
+Report that in the example's README under "Source mapping note" and proceed
+without claiming source-mapped ATT.
 
 ## Anti-patterns — don't do these
 

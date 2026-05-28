@@ -26,7 +26,7 @@ self-contained directory**.
 | folder | kernel | source | headline |
 |---|---|---|---|
 | [`examples/pa_mqa_logits_fp4`](examples/pa_mqa_logits_fp4) | FP4 MQA Logits | [`ROCm/FlyDSL@9120078`](https://github.com/ROCm/FlyDSL/commit/9120078d35d7d232b3941ded5b76a1ca92329ef0) | 1189.9 TFLOPS at batch=32 ctx=128K with `total_CTAs=507/512`; stall-bound (35 % `vmcnt`, 22 % `lgkmcnt`, only 0.1 % EXEC); 5 waves/SIMD, 11 VGPRs from 6 waves/SIMD |
-| [`examples/flash_attn_func`](examples/flash_attn_func) | Flash Attention Func | `FlyDSL-lab@18c5a7e` | 371.7 TFLOPS at B=1 S=2048 H=32 D=128 with `total_CTAs=512/512`; ping-pong exists but consume points still stall (28 % `vmcnt`, 16 % `lgkmcnt`, 58.5 % stall ratio) |
+| [`examples/flash_attn_func`](examples/flash_attn_func) | Flash Attention Func | `FlyDSL-lab@18c5a7e` | 371.7 TFLOPS at B=1 S=2048 H=32 D=128 with `total_CTAs=512/512`; cold-debug capture maps 2069/2070 ISA rows; ping-pong exists but consume points still stall (29 % `vmcnt`, 16 % `lgkmcnt`, 58.8 % stall ratio) |
 
 ## How to use a captured trace
 
@@ -64,6 +64,12 @@ diagnostic labels, not automatic proof of saturation), cleanup, analysis with
 `hotspot_analyzer.py`, report template, the per-example directory layout, and
 the gotchas that cost us time to figure out (empty-shell folders, `dispatch_<N>`
 numbering, debug-info plumbing, etc.).
+
+For ATT source mapping, capture from a **fresh FlyDSL debug cache**. Set
+`FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` and an isolated `FLYDSL_RUNTIME_CACHE_DIR`
+before any discovery/capture command that can trigger JIT. If a no-debug HSACO
+is already cached, rocprofv3 cannot add Python line tables later; `code.json`
+will show `mapped=0/N` even with `AsmDebug: True`.
 
 Quick canonical layout:
 
