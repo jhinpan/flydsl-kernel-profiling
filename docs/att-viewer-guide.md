@@ -73,6 +73,35 @@ It is still one of the best optimization signals because a large wait usually
 means a load was issued too late, the wait was placed too early, or there was
 not enough independent work between producer and consumer to hide latency.
 
+## Bubbles, `s_waitcnt`, and `s_nop`
+
+Large blank/bubble regions in the wave timeline often line up with explicit
+dependency drains. Start by checking hot `s_waitcnt` instructions and their
+dependency arrows, because those waits usually identify the producer/consumer
+edge that failed to hide memory or LDS latency.
+
+`s_nop` is different from a barrier: it is compiler-inserted padding or a
+scheduling delay, not a synchronization primitive. Still treat hot `s_nop`
+clusters as useful evidence. They often mark a spot where the compiler could not
+find independent work to cover an outstanding dependency, so the optimization
+target is usually the surrounding schedule: issue the producer earlier, move
+independent work between the producer and consumer, or reduce the hard wait
+boundary.
+
+For ping-pong / double-buffered kernels, the pattern to look for is:
+
+```text
+buffer_load ... lds   # issue async DMA-to-LDS for the next tile
+s_waitcnt ...         # consume-side drain; hot here means prefetch distance was insufficient
+s_barrier             # workgroup visibility before LDS reuse/consume
+ds_read_*             # read current tile from LDS
+v_mfma_*              # consume the tile
+```
+
+If `s_waitcnt` or `s_nop` dominates the top PCs on a steady-state path, the
+primary recommendation should usually be to improve overlap or reduce hard
+producer/consumer boundaries, not to tune MFMA issue first.
+
 For this repo's first FP4 MQA trace, the production-shape trace showed:
 
 - `LDS/SMEM-wait` from `lgkmcnt`: the largest stall bucket.

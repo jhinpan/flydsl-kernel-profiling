@@ -315,6 +315,10 @@ Capture from its output:
    (`vmcnt`), VMEM-load, MFMA/FMA, barrier. Note which bucket is #1; this
    shapes the ranking in §4 of the report.
 2. **Top-15 hotspot PCs** — each with `(stall_cycles, stall_type, ASM, source_loc)`.
+   Treat hot `s_waitcnt` PCs as consume-side dependency drains. Treat hot
+   `s_nop` clusters as compiler-inserted scheduling bubbles, not barriers, but
+   still record them because they often mark missing overlap around the same
+   producer/consumer boundary.
 3. **Register pressure & occupancy** — `arch_vgpr`, `accum_vgpr`,
    `waves/SIMD`, and "next occupancy step requires VGPR ≤ X". The skill
    knows the right formula per arch (gfx942 split / gfx950 combined pool).
