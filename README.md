@@ -25,7 +25,7 @@ self-contained directory**.
 
 | folder | kernel | source | headline |
 |---|---|---|---|
-| [`examples/pa_mqa_logits_fp4`](examples/pa_mqa_logits_fp4) | FP4 MQA Logits | [`ROCm/FlyDSL@9120078`](https://github.com/ROCm/FlyDSL/commit/9120078d35d7d232b3941ded5b76a1ca92329ef0) | 605 TFLOPS at batch=8 ctx=64K, but under target (`total_CTAs=391/512`); stall-bound (43 % `lgkmcnt`, 19 % `vmcnt`, only 0.3 % EXEC); 5 waves/SIMD, 11 VGPRs from 6 waves/SIMD |
+| [`examples/pa_mqa_logits_fp4`](examples/pa_mqa_logits_fp4) | FP4 MQA Logits | [`ROCm/FlyDSL@9120078`](https://github.com/ROCm/FlyDSL/commit/9120078d35d7d232b3941ded5b76a1ca92329ef0) | 1189.9 TFLOPS at batch=32 ctx=128K with `total_CTAs=507/512`; stall-bound (35 % `vmcnt`, 22 % `lgkmcnt`, only 0.1 % EXEC); 5 waves/SIMD, 11 VGPRs from 6 waves/SIMD |
 
 ## How to use a captured trace
 

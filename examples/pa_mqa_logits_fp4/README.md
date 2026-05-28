@@ -10,9 +10,9 @@ bundle/
 ├── README.md              ← this file
 ├── att_viewer/            ← feed these to AMD ATT Viewer
 │   ├── small/             ← batch=4 ctx=8K (1 chunk/CTA, prologue-bound)
-│   │   └── ui_output_agent_26025_dispatch_201/
-│   └── big/               ← batch=8 ctx=64K (3 chunks/CTA, under target)
-│       └── ui_output_agent_64914_dispatch_234/
+│   │   └── ui_output_agent_32435_dispatch_197/
+│   └── big/               ← batch=32 ctx=128K (17 chunks/CTA, 507/512 CTAs)
+│       └── ui_output_agent_55351_dispatch_426/
 ├── compute_viewer/        ← feed these to rocprof-compute-viewer
 │   ├── small_results.json     (rocprofv3 full event stream)
 │   ├── small_agent_info.csv   (GPU/agent metadata)
@@ -39,9 +39,10 @@ python3 -m http.server 8080
 # Open http://localhost:8080/ in a browser → click into a ui_output_agent_* dir
 ```
 
-Pick `big/` for larger loop-body coverage (production-like shape, 3 chunks per
-CTA), but do not treat it as fully saturated; see the workload sizing note.
-Pick `small/` to see the cold-prologue tail.
+Pick `big/` for the primary saturation-validated trace. It uses
+`safe_chunks_per_cta=17` and `total_ctas=507` against the default
+`parallel_unit_num=512`; the sampled CU timelines do not show an obvious
+underfilled tail. Pick `small/` to see the cold-prologue tail.
 
 If the ATT Viewer columns/tabs are unfamiliar, read the repo-level
 [`docs/att-viewer-guide.md`](../../docs/att-viewer-guide.md). In particular:
@@ -87,12 +88,11 @@ the one ATT-captured iteration.
 ## Workload sizing note
 
 This example intentionally keeps both a small prologue-oriented trace and a
-larger loop-body trace. The current `big` shape reports
-`safe_chunks_per_cta=3` and `total_ctas=391`, which is useful but still below
-the default `parallel_unit_num=512` target. For a future saturated recapture,
-pick `batch`, effective `ctx`, or `parallel_unit_num` so `total_ctas` lands
-closer to the target and confirm in `Compute Unit` / `Utilization` that there is
-no obvious underfilled tail.
+primary saturation-validated trace. The current `big` shape reports
+`safe_chunks_per_cta=17` and `total_ctas=507`, close to the default
+`parallel_unit_num=512` target. The kept ATT dispatch has 32 wave JSON files and
+512 occupancy rows across the sampled SE/SIMD slots, with no obvious sampled-CU
+tail.
 
 ## Source mapping note (important)
 
@@ -116,5 +116,5 @@ With this fixed the ATT Viewer will let you click an ISA line and jump to e.g.
 cd /sgl-workspace/jin/fp4_mqa_probe
 FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=build-fly/python_packages:. \
     rocprofv3 -i input_trace_big.yaml -- python tests/kernels/test_pa_mqa_logits_fp4.py \
-        --batch 8 --ctx 65536 --num_iters 12 --num_warmup 3
+        --batch 32 --ctx 131072 --num_iters 12 --num_warmup 3
 ```

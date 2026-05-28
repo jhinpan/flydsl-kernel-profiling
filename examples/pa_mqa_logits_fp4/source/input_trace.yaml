@@ -5,10 +5,10 @@ jobs:
     -
         kernel_include_regex: "pa_mqa_logits_fp4_kernel_0"
         kernel_exclude_regex:
-        kernel_iteration_range: "[8, [10-10]]"
+        kernel_iteration_range: "[6, [8-8]]"
         output_file: out
-        output_directory: /sgl-workspace/jin/fp4_mqa_probe/prof/att
-        output_format: [json, csv, otf2, pftrace]
+        output_directory: /sgl-workspace/jin/fp4_mqa_probe/prof/att_small_v2
+        output_format: [json, csv]
         truncate_kernels: true
         sys_trace: false
         advanced_thread_trace: true
