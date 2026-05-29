@@ -40,8 +40,8 @@ reproduce:
 | metric (big, dispatch_44) | before | after |
 |---|---:|---:|
 | distinct mapped source lines | 7 | **20** |
-| top-1 line weight share (Hit+Stall) | 0.76 | 0.64 |
-| effective #lines `exp(H)` | 2.0 | **4.5** |
+| top-1 line weight share (Hit+Stall) | 0.76 | 0.63 |
+| effective #lines `exp(H)` | 2.0 | **4.8** |
 | weight on `:283` (`_mfma`) | 19.9 % | **0 %** |
 | MFMA → call sites (740/741 GEMM1, 1111/1112 GEMM2) | — | ✓ |
 | DMA / wait / barrier / V-pre-read → kernel lines | — | 654, 692, 689, 734, 977, 1110 … |
@@ -59,8 +59,9 @@ have no specific source line, and the inline softmax/index arithmetic. The latte
 is what FlyDSL commit `9f29c0de` ("fix asm source code map") targets at the arith
 layer — complementary to this scheduling-path patch.
 
-After traces: `big/ui_output_agent_48046_dispatch_44_after_loc_fix`,
-`small/ui_output_agent_14326_dispatch_44_after_loc_fix`. The `source/` kernel is
+After traces: `big/ui_output_agent_27340_dispatch_44_after_loc_fix`,
+`small/ui_output_agent_56505_dispatch_44_after_loc_fix` (recaptured from FlyDSL
+branch tip `0f4041c0`, the `@traced_op` form of the sync wrappers). The `source/` kernel is
 the patched (post-fix) version; the pre-fix `dispatch_44` folders keep their own
 captured `source_0_flash_attn_func.py` snapshot.
 
