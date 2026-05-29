@@ -18,6 +18,52 @@ The kept cold-debug traces are `small/ui_output_agent_32235_dispatch_44` and
 `big/ui_output_agent_38430_dispatch_44`, both with 2069 / 2070 ISA rows mapped
 to Python source.
 
+## 0. Source-location granularity: before → after (#587)
+
+The original traces map 2069/2070 rows but the mapping is useless for navigating
+the schedule: **91.9 % of kernel instructions collapse onto `flash_attn_func.py:257`**
+(the `@flyc.kernel` decorator) and another 6.3 % onto `:283` (the body of the
+one-line `_mfma` helper). Every DMA-to-LDS load, every matmul, every wait lands
+on one of two lines. Root cause: FlyDSL emits these ops from nested helper
+closures, so `traced_op`'s `_caller_location(depth=1)` resolves to the helper
+body, not the user's scheduling line.
+
+The fix (FlyDSL branch `jhinpan:fix-issue-587-att-source-loc`, issue #587) adds a
+`source_loc` scope that pins the user call-site location and is honored by both
+untraced ODS builders and `@traced_op` leaves, plus loc-aware `gpu.barrier` /
+`s_waitcnt` / `sched_*`. The `after_loc_fix` traces are recaptured with that
+patch; locations are pure metadata so the debug-off ISA is **byte-identical** and
+kernel perf is unchanged (372 TFLOPS, see §0 config table). Run
+`source/att_source_granularity.py <before>/code.json <after>/code.json` to
+reproduce:
+
+| metric (big, dispatch_44) | before | after |
+|---|---:|---:|
+| distinct mapped source lines | 7 | **20** |
+| top-1 line weight share (Hit+Stall) | 0.76 | 0.64 |
+| effective #lines `exp(H)` | 2.0 | **4.5** |
+| weight on `:283` (`_mfma`) | 19.9 % | **0 %** |
+| MFMA → call sites (740/741 GEMM1, 1111/1112 GEMM2) | — | ✓ |
+| DMA / wait / barrier / V-pre-read → kernel lines | — | 654, 692, 689, 734, 977, 1110 … |
+
+The scheduling sites the issue cares about are now navigable: K DMA double-buffer
+at `coop_dma_k` call sites, GEMM1/GEMM2 MFMA, the V-visibility waits, and the
+GEMM2 V pre-read each resolve to the line that expresses them. A useful
+side-effect: 64 of 84 backend-inserted `s_waitcnt` rows moved onto the MFMA lines
+they guard, pulled along by the now-located matmuls.
+
+What stays on the function line (`:258` after the +1 decorator shift, still ~64 %
+of weight) is **not** FlyDSL-controllable: 166 backend `s_nop` hazard-pad rows
+plus a handful of very-high-stall compiler-inserted `s_waitcnt` barriers, which
+have no specific source line, and the inline softmax/index arithmetic. The latter
+is what FlyDSL commit `9f29c0de` ("fix asm source code map") targets at the arith
+layer — complementary to this scheduling-path patch.
+
+After traces: `big/ui_output_agent_48046_dispatch_44_after_loc_fix`,
+`small/ui_output_agent_14326_dispatch_44_after_loc_fix`. The `source/` kernel is
+the patched (post-fix) version; the pre-fix `dispatch_44` folders keep their own
+captured `source_0_flash_attn_func.py` snapshot.
+
 ## 1. What this kernel is doing
 
 This is a useful flash-attention trace because the source is explicitly built
