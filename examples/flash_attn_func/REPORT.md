@@ -35,7 +35,7 @@ kernel perf is unchanged (372 TFLOPS, see config table). Run
 
 | metric (big, dispatch_44) | before | after |
 |---|---:|---:|
-| distinct mapped source lines | 7 | **30** |
+| distinct mapped lines (flash_attn_func.py) | 6 | **29** |
 | top-1 line weight share (Hit+Stall) | 0.76 | 0.53 |
 | effective #lines `exp(H)` | 2.0 | **7.1** |
 | weight on `:283` (`_mfma`) | 19.9 % | **0 %** |
@@ -56,11 +56,18 @@ kernel perf is unchanged (372 TFLOPS, see config table). Run
    function line. This is what makes the GEMM↔softmax ping-pong's softmax half
    navigable.
 
-What still sits on the function line (`:258`, ~54 % of weight) is **not**
-FlyDSL-source-controllable: 166 backend `s_nop` hazard-pad rows plus a few
-very-high-stall compiler-inserted `s_waitcnt` barriers (no source line), and the
-`exp2` / `select` ops — these are `ArithValue` methods (framework arith layer,
-what FlyDSL commit `9f29c0de` targets), not kernel helpers.
+What still sits on the function line (`:258`, ~54 % of sampled weight) is only
+partly beyond FlyDSL's reach — three buckets, as % of total flash_attn_func weight:
+
+- **~35 %**: backend-inserted `s_nop` / `s_waitcnt` (hazard pad + compiler waits) —
+  no source line, not controllable.
+- **~7 %**: `exp2` and the causal-mask compare / `select` — `ArithValue` *methods*
+  (framework arith layer, what FlyDSL commit `9f29c0de` targets), not kernel helpers.
+- **~12 %**: kernel-emitted ops this patch did **not** scope — most notably the
+  epilogue O store (`global_store`, the single biggest non-wait item on `:258`),
+  plus some LDS reads, `v_ldexp`, adds, and bf16 packing. These are inline in the
+  kernel body and *are* attributable with more `source_loc` scoping; just out of
+  scope here.
 
 After traces: `big/ui_output_agent_50261_dispatch_44_after_loc_fix`,
 `small/ui_output_agent_23205_dispatch_44_after_loc_fix` (recaptured from FlyDSL
