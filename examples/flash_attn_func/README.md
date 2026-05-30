@@ -34,10 +34,20 @@ bundle/
 ### ATT Viewer
 
 ```bash
-cd bundle/att_viewer/big
+cd examples/flash_attn_func/att_viewer/big
 python3 -m http.server 8080
-# Open http://localhost:8080/ in a browser, then click ui_output_agent_38430_dispatch_44/
+# Open http://localhost:8080/ in a browser, then click a folder:
+#   ui_output_agent_38430_dispatch_44/                -> before (coarse: ~92% of insts on :257/:283)
+#   ui_output_agent_55287_dispatch_44_after_loc_fix/  -> after  (#587 fix: insts map to their kernel lines)
 ```
+
+The bundle is self-contained and **portable across machines**: the viewer reads
+the `source_*.py` files inside each folder, so a plain `git clone` is enough —
+the absolute paths in `code.json` are identifiers, never read from disk. In the
+`*_after_loc_fix` trace a hot MFMA lands on `mfma_acc` (`:746`/`:1117`), a
+DMA-to-LDS on `coop_dma_k` (`:697`), the epilogue O store on `_store_global_half`
+(`:1152`), the GEMM2 V pre-read on `_read_v_pack` (`:1115`), and the softmax on
+its `_fmax`/`_fadd`/`_fmul` lines (`923`–`962`).
 
 Use `big/` for the primary trace. It has `B=1 S=2048 H=32 D=128`,
 `BLOCK_M=128`, 512 CTAs, 32 sampled wave JSON files, 512 occupancy rows across

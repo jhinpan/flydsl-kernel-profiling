@@ -72,8 +72,8 @@ partly beyond FlyDSL's reach — as % of total flash_attn_func weight:
   `source_loc` scoping; out of scope here. (The epilogue O store, previously the
   biggest item in this bucket, is now scoped — layer 3 above.)
 
-After traces: `big/ui_output_agent_34195_dispatch_44_after_loc_fix`,
-`small/ui_output_agent_50498_dispatch_44_after_loc_fix` (recaptured from FlyDSL
+After traces: `big/ui_output_agent_55287_dispatch_44_after_loc_fix`,
+`small/ui_output_agent_58550_dispatch_44_after_loc_fix` (recaptured from FlyDSL
 branch tip `1042aa97`). The `source/` kernel is the patched (post-fix) version;
 the pre-fix `dispatch_44` folders keep their own captured
 `source_0_flash_attn_func.py` snapshot.
