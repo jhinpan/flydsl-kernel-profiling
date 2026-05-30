@@ -29,19 +29,20 @@ closures, so `traced_op`'s `_caller_location(depth=1)` resolves to the helper
 body, not the user's scheduling line.
 
 The fix (FlyDSL PR #593, branch `jhinpan:fix-issue-587-att-source-loc`, issue
-#587) is two layers, both **pure metadata** — debug-off ISA is byte-identical and
+#587) is three layers, all **pure metadata** — debug-off ISA is byte-identical and
 kernel perf is unchanged (372 TFLOPS, see config table). Run
 `source/att_source_granularity.py <before>/code.json <after>/code.json` to reproduce:
 
 | metric (big, dispatch_44) | before | after |
 |---|---:|---:|
-| distinct mapped lines (flash_attn_func.py) | 6 | **29** |
-| top-1 line weight share (Hit+Stall) | 0.76 | 0.53 |
-| effective #lines `exp(H)` | 2.0 | **7.1** |
+| distinct mapped lines (flash_attn_func.py) | 6 | **30** |
+| top-1 line weight share (Hit+Stall) | 0.76 | 0.50 |
+| effective #lines `exp(H)` | 2.0 | **8.0** |
 | weight on `:283` (`_mfma`) | 19.9 % | **0 %** |
-| GEMM MFMA → call sites | — | 744/745 (GEMM1), 1115/1116 (GEMM2) |
-| K/V DMA, waits, V pre-read → kernel lines | — | 658, 696, 738, 693, 981, 1108, 1114 |
-| softmax max / sum / rescale → kernel lines | — | 922–961 (`_fmax`/`_fadd`/`_fmul`/`_fsub`) |
+| GEMM MFMA → call sites | — | 745/746 (GEMM1), 1116/1117 (GEMM2) |
+| K/V DMA, waits, V pre-read → kernel lines | — | 659, 697, 739, 694, 982, 1109, 1115 |
+| softmax max / sum / rescale → kernel lines | — | 923–962 (`_fmax`/`_fadd`/`_fmul`/`_fsub`) |
+| epilogue O store → call site | — | 1152 (`_store_global_half`) |
 
 1. **Scheduling path** — a `source_loc` scope (honored by untraced ODS builders
    via MLIR's ambient location and by `@traced_op` leaves via a thread-local pin)
@@ -52,26 +53,28 @@ kernel perf is unchanged (372 TFLOPS, see config table). Run
    backend-inserted `s_waitcnt` rows moved onto the MFMA lines they guard.
 2. **Softmax compute** — `@source_loc_scope` on the `_fadd`/`_fsub`/`_fmul`/`_fmax`
    arith helpers, so the online-softmax running-max / exp-sum and the o_acc rescale
-   (`_fmul(Vec(o_acc), corr_vec)`) attribute to lines 922–961 instead of the
+   (`_fmul(Vec(o_acc), corr_vec)`) attribute to lines 923–962 instead of the
    function line. This is what makes the GEMM↔softmax ping-pong's softmax half
    navigable.
+3. **Epilogue O store** — `@source_loc_scope` on `_store_global_half`, so the output
+   O `global_store` (previously the single biggest non-wait item still collapsed)
+   attributes to its normalize-and-store call site (`:1152`).
 
-What still sits on the function line (`:258`, ~54 % of sampled weight) is only
-partly beyond FlyDSL's reach — three buckets, as % of total flash_attn_func weight:
+What still sits on the function line (`:258`, ~51 % of sampled weight) is only
+partly beyond FlyDSL's reach — as % of total flash_attn_func weight:
 
-- **~35 %**: backend-inserted `s_nop` / `s_waitcnt` (hazard pad + compiler waits) —
+- **~36 %**: backend-inserted `s_nop` / `s_waitcnt` (hazard pad + compiler waits) —
   no source line, not controllable.
 - **~7 %**: `exp2` and the causal-mask compare / `select` — `ArithValue` *methods*
   (framework arith layer, what FlyDSL commit `9f29c0de` targets), not kernel helpers.
-- **~12 %**: kernel-emitted ops this patch did **not** scope — most notably the
-  epilogue O store (`global_store`, the single biggest non-wait item on `:258`),
-  plus some LDS reads, `v_ldexp`, adds, and bf16 packing. These are inline in the
-  kernel body and *are* attributable with more `source_loc` scoping; just out of
-  scope here.
+- **~8 %**: a tail of inline kernel ops not yet scoped — `v_ldexp` (exp scale-back),
+  a `global_load`, some `ds_read` LDS loads, and adds. Attributable with more
+  `source_loc` scoping; out of scope here. (The epilogue O store, previously the
+  biggest item in this bucket, is now scoped — layer 3 above.)
 
-After traces: `big/ui_output_agent_50261_dispatch_44_after_loc_fix`,
-`small/ui_output_agent_23205_dispatch_44_after_loc_fix` (recaptured from FlyDSL
-branch tip `36e9f0f6`). The `source/` kernel is the patched (post-fix) version;
+After traces: `big/ui_output_agent_34195_dispatch_44_after_loc_fix`,
+`small/ui_output_agent_50498_dispatch_44_after_loc_fix` (recaptured from FlyDSL
+branch tip `1042aa97`). The `source/` kernel is the patched (post-fix) version;
 the pre-fix `dispatch_44` folders keep their own captured
 `source_0_flash_attn_func.py` snapshot.
 
