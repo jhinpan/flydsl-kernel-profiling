@@ -96,8 +96,8 @@ to `docs/data/kernels.json`.
 ## How to use a captured trace
 
 ```bash
-git clone https://github.com/jhinpan/flydsl-kernel-profiling
-cd flydsl-kernel-profiling/examples/<kernel>
+git clone https://github.com/jhinpan/flydsl-kernel-profiling-lib
+cd flydsl-kernel-profiling-lib/examples/<kernel>
 
 # 1. Read the analysis writeup
 $EDITOR REPORT.md

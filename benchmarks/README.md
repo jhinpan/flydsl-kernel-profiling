@@ -6,11 +6,13 @@ one kernel stall on one diagnostic shape." This layer answers a different
 question: **across the shapes that actually occur in models and serving, is
 FlyDSL's kernel faster than the field — and if not, why?**
 
-The two layers share the `examples/<op>/` tree but never collide. ATT work owns
-`REPORT.md`, the per-example `README.md`, `att_viewer/`, `compute_viewer/`,
-`source/`. This layer owns `shape_ledger.jsonl`, `baseline_matrix.yaml`,
-`benchmark_results.{jsonl,csv}`, `coverage_matrix.md`, `benchmark_summary.md`.
-New files here **never clobber** the ATT bundle's `REPORT.md` or `README.md`.
+The two layers are keyed by the same op names but land in different trees. ATT
+work owns top-level `examples/<op>/` (`REPORT.md`, per-example `README.md`,
+`att_viewer/`, `compute_viewer/`, `source/`). This benchmark layer owns
+`benchmarks/examples/<op>/` (`shape_ledger.jsonl`, `baseline_matrix.yaml`,
+`benchmark_results.{jsonl,csv}`, `coverage_matrix.md`,
+`benchmark_summary.md`, and optional tier artifacts). New benchmark files
+**never clobber** the ATT bundle's `REPORT.md` or `README.md`.
 
 ## Directory tree
 
@@ -34,14 +36,16 @@ benchmarks/
 │   └── manual_shape_importer.py   (synthetic-boundary + diagnostic + manual)
 ├── providers/                 ← one adapter per (provider, op_type)
 │   ├── base.py                ← ProviderAdapter contract + load_entrypoint
-│   ├── flydsl.py              ← candidate: build_rmsnorm_module
-│   ├── pytorch.py             ← F.rms_norm (also the dtype-matched reference provider)
-│   ├── aiter.py               ← compiled module_rmsnorm (CK/HIP/ASM, records >8192 branch)
-│   ├── aiter_triton.py        ← aiter.ops.triton.normalization.rmsnorm
-│   ├── triton.py              ← sglang standalone one-pass kernel
-│   └── aiter_ck / aiter_asm / ck / gluon / hipblaslt   ← honest support-detection stubs
+│   ├── flydsl.py / pytorch.py / aiter.py / aiter_triton.py / triton.py
+│   │                            ← shared rmsnorm adapters
+│   ├── <op>.py                  ← op-specific candidate/baseline adapters
+│   └── aiter_ck.py / aiter_asm.py / ck.py / gluon.py / hipblaslt.py
+│                                ← backend-specific adapters or honest support stubs
 ├── runners/
-│   └── multishape_runner.py   ← orchestrator: inputs once/shape, ref, every provider
+│   ├── correctness_runner.py  ← correctness-only rows, no timing
+│   ├── multishape_runner.py   ← orchestrator: inputs once/shape, ref, every provider
+│   ├── profiler_runner.py     ← rocprofv3 kernel-trace gate for hot sub-parity shapes
+│   └── regression_runner.py   ← current-vs-previous latency + hot-shape guard
 ├── reports/                   ← CPU-only, from ledger + results
 │   ├── analysis.py            ← join + per-shape speedups + best-baseline + aggregates
 │   ├── summarize_results.py   ← benchmark_summary.md (headline + splits + decision)
@@ -49,7 +53,7 @@ benchmarks/
 │   ├── render_markdown_report.py  ← render both at once
 │   ├── weighted_summary.py    ← weighted vs unweighted aggregate
 │   └── classify_bottleneck.py ← rule-based gap classification
-└── examples/<op>/             ← artifacts land here (rmsnorm is fully wired)
+└── examples/<op>/             ← benchmark artifacts land here
 ```
 
 ## `env.sh` — the recipe and WHY
@@ -163,39 +167,66 @@ python -m benchmarks.reports.weighted_summary \
   --results benchmarks/examples/rmsnorm/benchmark_results.jsonl
 ```
 
+Optional tier runners:
+
+```bash
+# correctness-only, no timing
+HIP_VISIBLE_DEVICES=7 benchmarks/bench -m benchmarks.runners.correctness_runner \
+  --op rmsnorm \
+  --shape-ledger benchmarks/examples/rmsnorm/shape_ledger.jsonl \
+  --baseline-matrix benchmarks/examples/rmsnorm/baseline_matrix.yaml \
+  --out benchmarks/examples/rmsnorm --seed 1234
+
+# profiler gate for a HOT sub-parity shape; writes profiles/<shape-id-without-sha1>/<provider>/
+HIP_VISIBLE_DEVICES=7 benchmarks/bench -m benchmarks.runners.profiler_runner \
+  --op rmsnorm --shape-id sha1:... --provider flydsl \
+  --shape-ledger benchmarks/examples/rmsnorm/shape_ledger.jsonl \
+  --out benchmarks/examples/rmsnorm/profiles
+
+# current-vs-previous guard; exits nonzero when regressions or hot shapes remain
+HIP_VISIBLE_DEVICES=7 benchmarks/bench -m benchmarks.runners.regression_runner \
+  --shape-ledger benchmarks/examples/rmsnorm/shape_ledger.jsonl \
+  --current benchmarks/examples/rmsnorm/benchmark_results.jsonl \
+  --previous <previous-benchmark-results.jsonl> \
+  --out-dir benchmarks/examples/rmsnorm
+```
+
 The runner streams `[i/n] <shape_id> M=..,N=.. <dtype> (<stage>)` per shape and
 keeps every provider in the output with an explicit `benchmark_status`
 (`ok | failed | oom | unsupported | incorrect | not_configured`) — nothing is
-silently dropped. Correctness is recorded inline on each row (`correct` +
-`correctness_error`); there is no separate correctness runner.
+silently dropped. Correctness is recorded inline on each timing row (`correct` +
+`correctness_error`). For a fast no-timing gate, run
+`benchmarks.runners.correctness_runner`; it emits `correctness_results.jsonl`.
 
 ## Where artifacts land
 
-Everything for one kernel lands in `examples/<op>/`:
+Everything for one benchmarked kernel lands in `benchmarks/examples/<op>/`:
 
 | File | Producer |
 |---|---|
 | `shape_ledger.jsonl` | importers (`shape_ledgers/*`) |
 | `baseline_matrix.yaml` | authored once per kernel |
+| `correctness_results.jsonl` | optional correctness-only runner (`runners/correctness_runner.py`) |
 | `benchmark_results.jsonl` / `.csv` | `runners/multishape_runner.py` |
 | `coverage_matrix.md` | `reports/coverage_matrix.py` |
 | `benchmark_summary.md` | `reports/summarize_results.py` |
-| `profiles/` (planned) | profiler gate (`runners/profiler_runner.py`) |
+| `profiles/<shape-id-without-sha1>/<provider>/diagnosis.json` | optional profiler gate (`runners/profiler_runner.py`) |
+| `regression_summary.md` / `regressions.jsonl` | optional regression runner (`runners/regression_runner.py`) |
 
-These sit next to — and never overwrite — the ATT bundle's `REPORT.md`,
-`README.md`, `att_viewer/`, `compute_viewer/`, `source/`.
+These sit in `benchmarks/examples/<op>/`; the ATT bundle remains in top-level
+`examples/<op>/` with `REPORT.md`, `README.md`, `att_viewer/`, `compute_viewer/`,
+and `source/`.
 
-## What is wired vs planned
+## What is wired vs opt-in
 
-- **Wired:** `rmsnorm` end-to-end (5 enabled providers + 5 honest stubs), the
-  AITER model-shapes importer, the manual/synthetic/diagnostic importer, the
-  multishape runner, and all report generators.
-- **Planned (schema slots reserved, reports reference them):** the profiler gate
-  runner (`runners/profiler_runner.py`, fires when kernel-only
-  `speedup_vs_best < 0.90`); serving-trace importers
-  (`sglang_trace_importer.py`, `atom_workload_importer.py`) that populate
-  `weight.*` and `source.kind in {sglang_trace, atom_workload}`; a regression
-  diff helper over a pinned ledger.
+- **Wired:** multi-shape ledgers and benchmark summaries for the checked-in
+  kernels under `benchmarks/examples/`, the correctness-only runner, the
+  multishape timing runner, the rocprofv3 kernel-trace profiler gate, the
+  regression runner, and all report generators.
+- **Still data-dependent / opt-in:** serving-trace importers
+  (`sglang_trace_importer.py`, `atom_workload_importer.py`) populate `weight.*`
+  and `source.kind in {sglang_trace, atom_workload}` when serving traces are
+  available; otherwise production-weighted geomeans remain `n/a`.
 
 ## See also
 
