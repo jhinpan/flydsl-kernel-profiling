@@ -18,11 +18,13 @@ kernel stall on one diagnostic shape" but "across the shapes that actually
 occur in models and serving, is FlyDSL's kernel faster than the field, and if
 not, why."
 
-The two layers share the `examples/<op>/` directory tree but never collide:
-ATT work writes `REPORT.md` / `README.md` / `att_viewer/` / `compute_viewer/` /
-`source/`; this layer writes `shape_ledger.jsonl`, `baseline_matrix.yaml`,
-`benchmark_results.{jsonl,csv}`, `coverage_matrix.md`, `benchmark_summary.md`.
-**Never clobber the ATT bundle's `REPORT.md` or the per-example `README.md`.**
+The two layers are keyed by the same op names but land in different trees:
+ATT work writes top-level `examples/<op>/` (`REPORT.md` / `README.md` /
+`att_viewer/` / `compute_viewer/` / `source/`); this layer writes
+`benchmarks/examples/<op>/` (`shape_ledger.jsonl`, `baseline_matrix.yaml`,
+`benchmark_results.{jsonl,csv}`, `coverage_matrix.md`, `benchmark_summary.md`,
+and optional tier artifacts). **Never clobber the ATT bundle's `REPORT.md` or
+the per-example `README.md`.**
 
 ## Purpose
 
@@ -37,10 +39,10 @@ ATT work writes `REPORT.md` / `README.md` / `att_viewer/` / `compute_viewer/` /
 
 ## Non-goals
 
-- Not a profiler. It measures wall-clock device time; it does not capture ISA,
-  stalls, or counters. When a hot shape is sub-parity it *triggers* an ATT
-  capture (see the profiler gate) but the capture itself is the ATT layer's job
-  (see the repo's top-level `AGENTS.md`).
+- Not a full ATT profiler. The benchmark runner measures wall-clock device time;
+  it does not capture ISA, stalls, or counters. When a hot shape is sub-parity,
+  the profiler gate can run a rocprofv3 `--kernel-trace` diagnosis. Full decoded
+  ATT capture remains the ATT layer's job (see the repo's top-level `AGENTS.md`).
 - Not a microbenchmark of a single shape. One-shape numbers are diagnostic only.
 - Not a correctness test suite. It checks correctness against an fp32 reference
   as a gate on whether a timing number is trustworthy; it is not exhaustive
@@ -55,8 +57,9 @@ generality:
 1. **Correctness** — every provider's output, upcast to fp32, must match the
    fp32 golden (`benchmarks/ops.py: Op.reference`) within a dtype-aware tolerance
    (`benchmarks/common.py: TOL`). An incorrect provider is still timed but its
-   row is labeled `incorrect` and excluded from speedup aggregates. This is run
-   inline by the multishape runner, not as a separate command.
+   row is labeled `incorrect` and excluded from speedup aggregates. The
+   multishape runner records correctness inline; `benchmarks.runners.correctness_runner`
+   is the optional no-timing gate that emits `correctness_results.jsonl`.
 2. **Diagnostic** — the single shape the existing ATT capture used
    (`source.kind=diagnostic`, `stage=diagnostic`). Lets the wall-clock layer and
    the instruction-level layer talk about the same workload.
@@ -64,13 +67,17 @@ generality:
    synthetic boundary probes, across the whole baseline matrix. This is the body
    of the benchmark.
 4. **Regression** — re-run a frozen ledger on a new FlyDSL commit and diff the
-   per-shape speedups to catch a regression before promotion. (Same runner +
-   reports against a pinned ledger; a dedicated diff helper is planned.)
+   per-shape speedups to catch a regression before promotion.
+   `benchmarks.runners.regression_runner` emits `regression_summary.md` and
+   `regressions.jsonl`.
 
 ## Data contracts (authoritative schemas in `benchmarks/schemas/`)
 
-Three on-disk artifacts. Validate with `benchmarks/validate.py` (uses
-`jsonschema` when present, falls back to a required-field + enum check).
+Three required on-disk data contracts. Validate with `benchmarks/validate.py`
+(uses `jsonschema` when present, falls back to a required-field + enum check).
+Optional runner outputs (`correctness_results.jsonl`, `profiles/...`, and
+`regression_summary.md` / `regressions.jsonl`) live beside them under
+`benchmarks/examples/<op>/`.
 
 ### shape_ledger.jsonl — `schemas/shape_ledger.schema.json`
 One JSONL row per benchmarked shape. Identity-defining fields are hashed into a
@@ -146,7 +153,7 @@ subclass, a `get_adapter(op_type)` factory, or an instance. Inputs / fp32
 reference / roofline live in `benchmarks/ops.py` (one `Op` subclass per
 op_type); providers never build their own inputs.
 
-**rmsnorm providers as wired today** (`examples/rmsnorm/baseline_matrix.yaml`):
+**rmsnorm providers as wired today** (`benchmarks/examples/rmsnorm/baseline_matrix.yaml`):
 `flydsl` (`build_rmsnorm_module`), `pytorch` (`F.rms_norm`, also the fp32
 reference source), `aiter` (compiled `module_rmsnorm`, records the Python
 `N>8192` CK branch, inner CK/HIP/ASM opaque), `aiter_triton`
@@ -201,9 +208,18 @@ HIP_VISIBLE_DEVICES=7 benchmarks/bench -m benchmarks.runners.multishape_runner \
 ```
 
 The runner emits `benchmark_results.jsonl` + `benchmark_results.csv`. Each row
-carries `correct` + `correctness_error`, so correctness is recorded inline (no
-separate correctness runner); a `correctness_results.jsonl` view is the
-correct-only projection of these rows.
+carries `correct` + `correctness_error`, so correctness is recorded inline.
+For a no-timing correctness gate, run:
+
+```bash
+HIP_VISIBLE_DEVICES=7 benchmarks/bench -m benchmarks.runners.correctness_runner \
+  --op rmsnorm \
+  --shape-ledger benchmarks/examples/rmsnorm/shape_ledger.jsonl \
+  --baseline-matrix benchmarks/examples/rmsnorm/baseline_matrix.yaml \
+  --out benchmarks/examples/rmsnorm --seed 1234
+```
+
+That optional pass emits `correctness_results.jsonl`.
 
 ### Generate the reports (CPU-only, from ledger + results)
 
@@ -233,15 +249,23 @@ python -m benchmarks.reports.weighted_summary \
   --results benchmarks/examples/rmsnorm/benchmark_results.jsonl
 ```
 
-### Profiler gate (planned: `benchmarks/runners/profiler_runner.py`)
+### Profiler gate (`benchmarks/runners/profiler_runner.py`)
 
-When a hot shape's kernel-only `speedup_vs_best < 0.90`, capture a rocprofv3/ATT
-trace of FlyDSL at that exact shape and fold the artifact path back into the
-result row's `profile_artifact` (the coverage matrix has a `profile` column for
-it). The capture follows the repo top-level `AGENTS.md` recipe (debug-info cold
-cache, kernel discovery, grid sizing, two traces, `hotspot_analyzer.py`). The
-gating rule is implemented in the analysis join (`speedup_vs_best`); the
-auto-capture runner that acts on it is the next runner to add.
+When a hot shape's kernel-only `speedup_vs_best < 0.90`, run the profiler gate
+for the candidate provider or record why it is deferred:
+
+```bash
+HIP_VISIBLE_DEVICES=7 benchmarks/bench -m benchmarks.runners.profiler_runner \
+  --op rmsnorm --shape-id sha1:... --provider flydsl \
+  --shape-ledger benchmarks/examples/rmsnorm/shape_ledger.jsonl \
+  --out benchmarks/examples/rmsnorm/profiles
+```
+
+This runner performs a rocprofv3 `--kernel-trace` diagnosis and writes
+`profiles/<shape-id-without-sha1>/<provider>/diagnosis.json` plus the repro and
+rocprof stdout/stderr. It does not replace a full decoded ATT bundle; if the
+diagnosis needs instruction-level stalls/source mapping, follow the repo
+top-level `AGENTS.md` ATT workflow.
 
 ## Bottleneck classification (`benchmarks/reports/classify_bottleneck.py`)
 
@@ -273,9 +297,9 @@ overhead is a separate eager-only verdict). Categories (exact strings):
 A shape is a profiler candidate iff it is HOT (in the model/serving set, not
 purely synthetic) and its kernel-only `speedup_vs_best < 0.90`. Unstable timing
 (`stable == False`, i.e. p90/p10 > 1.2) is re-measured, not profiled. The
-capture corroborates a `tuning_gap`/`flydsl_codegen_gap` verdict with ISA-level
-evidence; never publish a `flydsl_codegen_gap` claim on an aligned shape without
-a trace.
+profiler gate corroborates launch/grid/kernel-trace facts; escalate to the
+top-level ATT workflow before making ISA-level stall/source-mapping claims such
+as a confirmed `flydsl_codegen_gap` on an aligned shape.
 
 ## Agent implementation contract (ordering)
 
@@ -285,10 +309,10 @@ Do these in order; do not skip a step or reorder.
    registered in `benchmarks/ops.py` (inputs + fp32 reference + roofline). If
    not, add the `Op` first — providers cannot build their own inputs.
 2. **Ensure the shape ledger.** Run the importers so
-   `examples/<op>/shape_ledger.jsonl` exists and covers model-config +
+   `benchmarks/examples/<op>/shape_ledger.jsonl` exists and covers model-config +
    synthetic-boundary + the diagnostic shape (+ serving when available).
    Importers upsert by `source.kind`, so re-running one never clobbers another.
-3. **Ensure the baseline matrix.** `examples/<op>/baseline_matrix.yaml` lists
+3. **Ensure the baseline matrix.** `benchmarks/examples/<op>/baseline_matrix.yaml` lists
    every provider with an honest `enabled`/`skip_reason`. Disabled providers
    stay listed so coverage shows them as `not_configured`.
 4. **Correctness.** Confirm the candidate (and each baseline) passes the fp32
@@ -303,15 +327,16 @@ Do these in order; do not skip a step or reorder.
 7. **Coverage.** Render `coverage_matrix.md` — verify nothing silently vanished.
 8. **Summary.** Render `benchmark_summary.md`.
 9. **Profiler gate.** For every HOT shape with kernel-only `speedup_vs_best <
-   0.90`, capture a rocprofv3/ATT trace (or record why deferred).
+   0.90`, run `benchmarks.runners.profiler_runner` for a rocprofv3 kernel-trace
+   diagnosis (or record why deferred). Escalate to the top-level ATT workflow
+   only when instruction-level stalls/source mapping are needed.
 10. **Classify.** Assign each sub-parity hot shape a category from the list
     above, with evidence + likely fix.
 11. **Decision.** Emit one of `promote | promote_with_guardrails | tune_needed |
-    rewrite_needed` (the implemented `decide()` vocabulary; the broader contract
-    set adds `codegen_issue` and `no_go` for codegen-blocked / abandon cases).
-    Tie the decision to the data: never claim production perf from
-    synthetic/diagnostic shapes alone, never compare vs opaque `aiter` without
-    labeling the backend branch.
+    rewrite_needed | blocked` (the implemented `decide()` vocabulary). Tie the
+    decision to the data: never claim production perf from synthetic/diagnostic
+    shapes alone, never compare vs opaque `aiter` without labeling the backend
+    branch.
 
 ## See also
 

@@ -1,4 +1,4 @@
-# AGENTS.md — flydsl-kernel-profiling
+# AGENTS.md — flydsl-kernel-profiling-lib
 
 Guide for any agent (human or LLM) asked to **profile a specific FlyDSL/ROCm
 kernel and add it to this repo as a new example**.
@@ -522,8 +522,10 @@ There is a second, separate layer in `benchmarks/` that lives **beside** the ATT
 trace bundles. The ATT layer asks "where does this one kernel stall on one
 diagnostic shape." The benchmark layer asks "across the shapes that occur in
 models and serving, is FlyDSL's kernel faster than the field, and if not, why."
-Both write under `examples/<op>/`, but the benchmark layer's files **never
-clobber** the ATT bundle's `REPORT.md` or the per-example `README.md`.
+ATT artifacts are checked in under top-level `examples/<op>/`; multi-shape
+benchmark artifacts are checked in under `benchmarks/examples/<op>/`. Keep those
+trees separate: benchmark runs must not write `REPORT.md`, the per-example
+`README.md`, `att_viewer/`, `compute_viewer/`, or `source/`.
 
 Full agent contract: `.claude/skills/flydsl-kernel-multishape-benchmark/SKILL.md`.
 How-to + env recipe: `benchmarks/README.md`. Shape sources: `benchmarks/shape_ledgers/README.md`.
@@ -539,19 +541,27 @@ build tree it raises `ModuleNotFoundError: flydsl._mlir`). Verified node: MI350X
 gfx950, ROCm 7.2, torch 2.9.1+rocm, triton 3.6. Importers and report generators
 are pure-data and run without the GPU env.
 
-### Required artifacts (per kernel, under `examples/<op>/`)
+### Required artifacts (per kernel, under `benchmarks/examples/<op>/`)
 
-Every benchmarked kernel must produce all of:
+Every benchmarked kernel's multi-shape bundle must produce all of:
 
 - `shape_ledger.jsonl` — shapes, stable `shape_id`, source kind, weights.
 - `baseline_matrix.yaml` — which providers run + honest `enabled`/`skip_reason`.
-- `correctness_results.jsonl` — the correct-only view of the result rows (the
-  `correct` field is recorded inline in `benchmark_results.jsonl`; correctness
-  is not a separate runner).
 - `benchmark_results.jsonl` + `benchmark_results.csv` — one row per
   (shape, provider); failed/unsupported/incorrect/disabled rows are KEPT.
 - `coverage_matrix.md` — per-shape × per-provider status grid.
 - `benchmark_summary.md` — headline + splits + classification + decision.
+
+Optional tier artifacts live in the same `benchmarks/examples/<op>/` directory:
+
+- `correctness_results.jsonl` — emitted by `benchmarks.runners.correctness_runner`
+  when a correctness-only pass is run. The timing runner also records `correct`
+  and `correctness_error` inline in `benchmark_results.jsonl`.
+- `profiles/<shape-id-without-sha1>/<provider>/diagnosis.json` — emitted by
+  `benchmarks.runners.profiler_runner` for profiler-gated shapes.
+- `regression_summary.md` + `regressions.jsonl` — emitted by
+  `benchmarks.runners.regression_runner` when comparing a current run to a
+  previous results file.
 
 ### Reporting rules (non-negotiable)
 
@@ -567,15 +577,18 @@ Every benchmarked kernel must produce all of:
 - **Never compare vs opaque `aiter` without labeling the backend.** aiter's
   compiled `module_rmsnorm` picks CK/HIP/ASM internally; record the visible
   Python branch (e.g. `>8192 → CK`) and mark the inner choice opaque.
-- **Auto-fire rocprofv3** on any HOT shape whose kernel-only
-  `speedup_vs_best < 0.90` (the profiler gate). Unstable timing (p90/p10 > 1.2)
-  is re-measured, not profiled.
+- **Profiler gate:** for any HOT shape whose kernel-only `speedup_vs_best < 0.90`,
+  run `benchmarks.runners.profiler_runner` for the candidate provider, or record
+  an explicit deferred reason. This runner performs a rocprofv3 kernel-trace
+  diagnosis; use the ATT bundle workflow above when full instruction-level ATT
+  capture is needed. Unstable timing (p90/p10 > 1.2) is re-measured, not profiled.
 
 ### Classification + decision vocabulary
 
 Classify each sub-parity hot shape as one of: `tuning_gap`,
 `implementation_gap`, `algorithm_gap`, `flydsl_codegen_gap`,
 `launch_or_roofline_limited`, `measurement_issue`,
-`baseline_unfair_or_unmatched` (plus `ok` for parity-or-better). Then emit one
-overall decision: `promote`, `promote_with_guardrails`, `tune_needed`,
-`rewrite_needed`, `codegen_issue`, or `no_go`.
+`baseline_unfair_or_unmatched` (plus `ok` for parity-or-better). Then emit the
+implemented overall decision from `benchmarks.reports.summarize_results`:
+`promote`, `promote_with_guardrails`, `tune_needed`, `rewrite_needed`, or
+`blocked`.
